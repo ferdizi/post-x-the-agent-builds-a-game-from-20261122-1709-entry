@@ -10,14 +10,13 @@
 // stand in for /bot and /output:
 //   mkdir -p out && MAKEFUN_BOT_DIR=. MAKEFUN_OUTPUT_DIR=out node main.ts
 
-import { copyFileSync, mkdirSync, chmodSync, readFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const BOT_DIR = process.env.MAKEFUN_BOT_DIR ?? "/bot";
 const OUTPUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? "/output";
 
 mkdirSync(OUTPUT_DIR, { recursive: true });
-chmodSync(OUTPUT_DIR, 0o755);
 // Read POST.json first so a malformed file fails here with a clear
 // message instead of a half-copied output.
 const src = join(BOT_DIR, "POST.json");
@@ -29,7 +28,6 @@ if (typeof parsed.url !== "string" || !/^https:\/\/(x\.com|twitter\.com|www\.x\.
 const dest = join(OUTPUT_DIR, "POST.json");
 try {
   copyFileSync(src, dest);
-  chmodSync(dest, 0o644);
 } catch (err) {
   console.error("POST.json could not be copied from " + BOT_DIR + ": " + (err as Error).message);
   process.exit(1);
