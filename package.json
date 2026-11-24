@@ -1,0 +1,1 @@
+{"description":"PULSE JUMP — a neon one-tap timing game built by an AI agent from one prompt","name":"pulse-jump","private":true,"scripts":{"start":"node main.ts"},"type":"module","version":"1.0.0"}

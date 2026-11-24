@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>PULSE JUMP — one prompt, one game</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #07030f; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; touch-action: none; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+"use strict";
+// PULSE JUMP — a neon one-tap timing game.
+// Built by an AI agent from one prompt: "Build PULSE JUMP: a neon one-tap
+// timing game where you launch an orb between pulsing rings — perfect taps
+// chain combos, three misses ends the run."
+// Tap (or press Space) when the needle is inside the glowing arc.
+// Perfect taps chain combos; the arc shrinks and the needle speeds up.
+
+const W = 540, H = 960;
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+function fitCanvas() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.style.width = Math.floor(W * scale) + "px";
+  canvas.style.height = Math.floor(H * scale) + "px";
+  canvas.width = Math.floor(W * scale * dpr);
+  canvas.height = Math.floor(H * scale * dpr);
+  ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
+}
+window.addEventListener("resize", fitCanvas);
+fitCanvas();
+
+// ---------- state ----------
+let state = "title"; // title | playing | gameover
+let score = 0, best = 0, combo = 0, lives = 3, ring = 0, level = 1;
+let needle = 0;          // needle angle (radians)
+let speed = 1.6;         // needle angular speed (rad/s)
+let target = 0.9;        // target arc centre angle
+let arcHalf = 0.38;      // target arc half-width (radians)
+let shake = 0, flash = 0, flashColor = "#ffffff";
+let jumpAnim = 0;        // 0..1 orb jump animation
+let particles = [];
+let floaters = [];
+let stars = [];
+let hue = 315;           // neon palette hue, drifts with level
+let time = 0;
+try { best = parseInt(localStorage.getItem("pulsejump_best") || "0", 10) || 0; } catch (e) { best = 0; }
+
+for (let i = 0; i < 90; i++) {
+  stars.push({ x: Math.random() * W, y: Math.random() * H, r: Math.random() * 1.8 + 0.4, s: Math.random() * 0.6 + 0.15 });
+}
+
+const params = new URLSearchParams(location.search);
+const DEMO = params.get("demo") === "1";
+
+function ringRadius() { return 190; }
+function cx() { return W / 2; }
+function cy() { return 500; }
+
+function newTarget() {
+  // New target arc somewhere away from the needle's current spot.
+  let a = Math.random() * Math.PI * 2;
+  if (Math.abs(angDiff(a, needle)) < 1.2) a += 1.4;
+  target = a;
+  arcHalf = Math.max(0.16, 0.38 - ring * 0.012);
+  speed = Math.min(4.6, 1.6 + ring * 0.09);
+}
+
+function angDiff(a, b) {
+  let d = a - b;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+
+function burst(x, y, color, n, power) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, v = (Math.random() * 0.7 + 0.3) * power;
+    particles.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1, decay: 0.02 + Math.random() * 0.03, size: 2 + Math.random() * 4, color });
+  }
+}
+
+function floater(x, y, text, color, big) {
+  x = Math.max(80, Math.min(W - 80, x));
+  floaters.push({ x, y, text, color, life: 1, big: !!big });
+}
+
+function neon(h, l) { return "hsl(" + h + ", 100%, " + (l || 65) + "%)"; }
+
+function beep(freq, dur) {
+  try {
+    if (!window._ac) window._ac = new (window.AudioContext || window.webkitAudioContext)();
+    const ac = window._ac, o = ac.createOscillator(), g = ac.createGain();
+    o.type = "sine"; o.frequency.value = freq;
+    g.gain.setValueAtTime(0.08, ac.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + dur);
+    o.connect(g); g.connect(ac.destination);
+    o.start(); o.stop(ac.currentTime + dur);
+  } catch (e) { /* audio is optional */ }
+}
+
+// ---------- input ----------
+function tap() {
+  if (state === "title") { startGame(); return; }
+  if (state === "gameover") { startGame(); return; }
+  if (state !== "playing") return;
+  const d = Math.abs(angDiff(needle, target));
+  const R = ringRadius(), x = cx() + Math.cos(needle) * R, y = cy() + Math.sin(needle) * R;
+  if (d <= arcHalf) {
+    const perfect = d <= arcHalf * 0.45;
+    combo++;
+    const gained = (perfect ? 100 : 50) + combo * (perfect ? 10 : 5);
+    score += gained;
+    burst(x, y, perfect ? neon(hue, 70) : "#ffffff", perfect ? 26 : 12, perfect ? 260 : 160);
+    floater(x, y - 30, (perfect ? "PERFECT +" : "GOOD +") + gained, perfect ? neon(hue, 70) : "#ffffff", perfect);
+    if (perfect) { shake = Math.max(shake, 5); beep(880, 0.12); } else { beep(520, 0.08); }
+    ring++;
+    if (ring % 8 === 0) { level++; hue = (hue + 55) % 360; floater(cx(), cy() - 190, "LEVEL " + level + " — FASTER!", "#ffffff", true); }
+    jumpAnim = 0;
+    newTarget();
+  } else {
+    lives--;
+    combo = 0;
+    shake = 10;
+    flash = 0.35; flashColor = "#ff2d55";
+    burst(x, y, "#ff2d55", 14, 200);
+    floater(x, y - 30, "MISS", "#ff2d55", true);
+    beep(140, 0.25);
+    if (lives <= 0) {
+      state = "gameover";
+      if (score > best) { best = score; try { localStorage.setItem("pulsejump_best", String(best)); } catch (e) {} }
+    }
+  }
+}
+
+function startGame() {
+  state = "playing";
+  score = 0; combo = 0; lives = 3; ring = 0; level = 1; hue = 315;
+  needle = 0; jumpAnim = 0; particles = []; floaters = [];
+  newTarget();
+}
+
+canvas.addEventListener("pointerdown", function (e) { e.preventDefault(); tap(); });
+window.addEventListener("keydown", function (e) {
+  if (e.code === "Space" || e.code === "Enter") { e.preventDefault(); tap(); }
+});
+
+// ---------- update ----------
+let last = performance.now();
+function update(dt) {
+  time += dt;
+  if (shake > 0) shake = Math.max(0, shake - dt * 26);
+  if (flash > 0) flash = Math.max(0, flash - dt * 1.6);
+  if (jumpAnim < 1) jumpAnim = Math.min(1, jumpAnim + dt * 5);
+  for (const s of stars) { s.y += s.s * dt * 14; if (s.y > H) { s.y = 0; s.x = Math.random() * W; } }
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.96; p.vy *= 0.96; p.life -= p.decay;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+  for (let i = floaters.length - 1; i >= 0; i--) {
+    const f = floaters[i];
+    f.y -= 46 * dt; f.life -= dt * 0.9;
+    if (f.life <= 0) floaters.splice(i, 1);
+  }
+  if (state === "playing") {
+    needle += speed * dt;
+    if (DEMO) {
+      // Auto-play: tap with perfect timing for footage capture.
+      if (Math.abs(angDiff(needle, target)) < 0.03) tap();
+    }
+  }
+}
+
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+// ---------- draw ----------
+function draw() {
+  ctx.save();
+  if (shake > 0) ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#0a0318"); g.addColorStop(0.55, "#12042a"); g.addColorStop(1, "#07030f");
+  ctx.fillStyle = g; ctx.fillRect(-20, -20, W + 40, H + 40);
+
+  ctx.fillStyle = "rgba(255,255,255,0.5)";
+  for (const s of stars) { ctx.globalAlpha = 0.25 + 0.55 * Math.abs(Math.sin(time * 2 + s.x)); ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill(); }
+  ctx.globalAlpha = 1;
+
+  if (state === "title") { drawTitle(); ctx.restore(); return; }
+  if (state === "gameover") { drawGame(); drawGameOver(); ctx.restore(); return; }
+  drawGame();
+  ctx.restore();
+  if (flash > 0) { ctx.fillStyle = flashColor; ctx.globalAlpha = flash * 0.55; ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1; }
+}
+
+function drawGame() {
+  const R = ringRadius();
+  const pulse = 1 + Math.sin(time * 6) * 0.03;
+
+  // faint outer rings for depth
+  ctx.lineWidth = 2;
+  for (let i = 1; i <= 3; i++) {
+    ctx.strokeStyle = "rgba(255,255,255,0.06)";
+    ctx.beginPath(); ctx.arc(cx(), cy(), R + i * 30, 0, Math.PI * 2); ctx.stroke();
+  }
+
+  // target arc (the glowing perfect zone)
+  const arcR = R * pulse;
+  ctx.lineCap = "round";
+  ctx.strokeStyle = neon(hue, 70);
+  ctx.shadowColor = neon(hue, 70); ctx.shadowBlur = 22;
+  ctx.lineWidth = 16;
+  ctx.beginPath(); ctx.arc(cx(), cy(), arcR, target - arcHalf, target + arcHalf); ctx.stroke();
+  ctx.shadowBlur = 0;
+  // perfect core of the arc
+  ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.arc(cx(), cy(), arcR, target - arcHalf * 0.45, target + arcHalf * 0.45); ctx.stroke();
+
+  // ring track
+  ctx.strokeStyle = "rgba(255,255,255,0.22)"; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.arc(cx(), cy(), R, 0, Math.PI * 2); ctx.stroke();
+
+  // needle
+  const nx = cx() + Math.cos(needle) * R, ny = cy() + Math.sin(needle) * R;
+  ctx.strokeStyle = "rgba(255,255,255,0.85)"; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(cx(), cy()); ctx.lineTo(nx, ny); ctx.stroke();
+
+  // center hub
+  ctx.fillStyle = neon(hue, 60);
+  ctx.shadowColor = neon(hue, 60); ctx.shadowBlur = 26;
+  ctx.beginPath(); ctx.arc(cx(), cy(), 26, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = "#0a0318";
+  ctx.font = "bold 26px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(String(ring), cx(), cy() + 1);
+
+  // orb (rides the needle tip, jumps outward on a hit)
+  const jr = R + Math.sin(jumpAnim * Math.PI) * 34;
+  const ox = cx() + Math.cos(needle) * jr, oy = cy() + Math.sin(needle) * jr;
+  ctx.fillStyle = "#ffffff";
+  ctx.shadowColor = neon(hue, 70); ctx.shadowBlur = 30;
+  ctx.beginPath(); ctx.arc(ox, oy, 13, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // particles
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // floaters
+  for (const f of floaters) {
+    ctx.globalAlpha = Math.max(0, f.life);
+    ctx.fillStyle = f.color;
+    ctx.font = (f.big ? "bold 34px" : "bold 24px") + " system-ui, sans-serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(f.text, f.x, f.y);
+  }
+  ctx.globalAlpha = 1;
+
+  // HUD
+  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 64px system-ui, sans-serif";
+  ctx.fillText(String(score), 28, 96);
+  ctx.font = "bold 20px system-ui, sans-serif";
+  ctx.fillStyle = "rgba(255,255,255,0.65)";
+  ctx.fillText("BEST " + best, 30, 128);
+  if (combo >= 2) {
+    ctx.fillStyle = neon(hue, 70);
+    ctx.font = "bold 30px system-ui, sans-serif";
+    ctx.textAlign = "right";
+    ctx.fillText("COMBO x" + combo, W - 28, 96);
+    ctx.textAlign = "left";
+  }
+  // lives
+  for (let i = 0; i < 3; i++) {
+    ctx.fillStyle = i < lives ? "#ff2d78" : "rgba(255,255,255,0.18)";
+    ctx.beginPath(); ctx.arc(W - 44 - i * 36, 138, 11, 0, Math.PI * 2); ctx.fill();
+  }
+  // level + hint
+  ctx.fillStyle = "rgba(255,255,255,0.6)";
+  ctx.font = "bold 18px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("LEVEL " + level + "  ·  RING " + (ring + 1), W / 2, H - 118);
+  ctx.fillStyle = neon(hue, 70);
+  ctx.font = "bold 22px system-ui, sans-serif";
+  ctx.fillText("TAP WHEN THE NEEDLE HITS THE GLOW", W / 2, H - 84);
+}
+
+function drawTitle() {
+  const R = 150;
+  ctx.strokeStyle = "rgba(255,255,255,0.14)"; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.arc(cx(), cy(), R, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = neon(hue, 70); ctx.shadowColor = neon(hue, 70); ctx.shadowBlur = 24; ctx.lineWidth = 14; ctx.lineCap = "round";
+  const a0 = time * 0.9;
+  ctx.beginPath(); ctx.arc(cx(), cy(), R, a0, a0 + 1.1); ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = "#ffffff";
+  ctx.beginPath(); ctx.arc(cx() + Math.cos(a0 + 1.1) * R, cy() + Math.sin(a0 + 1.1) * R, 13, 0, Math.PI * 2); ctx.fill();
+
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 76px system-ui, sans-serif";
+  ctx.fillText("PULSE", W / 2, 218);
+  ctx.fillStyle = neon(hue, 70);
+  ctx.fillText("JUMP", W / 2, 296);
+  ctx.fillStyle = "rgba(255,255,255,0.75)";
+  ctx.font = "bold 24px system-ui, sans-serif";
+  ctx.fillText("ONE TAP. ONE PERFECT MOMENT.", W / 2, 372);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 26px system-ui, sans-serif";
+  const blink = 0.6 + 0.4 * Math.sin(time * 4);
+  ctx.globalAlpha = blink;
+  ctx.fillText(DEMO ? "DEMO — WATCH IT PLAY" : "TAP TO START", W / 2, H - 150);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = "rgba(255,255,255,0.5)";
+  ctx.font = "20px system-ui, sans-serif";
+  ctx.fillText("tap when the needle hits the glow", W / 2, H - 110);
+  ctx.fillText("built by an AI agent from one prompt · make.fun", W / 2, H - 76);
+}
+
+function drawGameOver() {
+  ctx.fillStyle = "rgba(5,2,12,0.72)";
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 62px system-ui, sans-serif";
+  ctx.fillText("GAME OVER", W / 2, 380);
+  ctx.fillStyle = neon(hue, 70);
+  ctx.font = "bold 44px system-ui, sans-serif";
+  ctx.fillText("SCORE " + score, W / 2, 470);
+  ctx.fillStyle = "rgba(255,255,255,0.75)";
+  ctx.font = "24px system-ui, sans-serif";
+  ctx.fillText("best " + best + "  ·  rings cleared " + ring, W / 2, 522);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 26px system-ui, sans-serif";
+  const blink = 0.6 + 0.4 * Math.sin(time * 4);
+  ctx.globalAlpha = blink;
+  ctx.fillText("TAP TO PLAY AGAIN", W / 2, 620);
+  ctx.globalAlpha = 1;
+}
+
+if (DEMO) startGame();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
